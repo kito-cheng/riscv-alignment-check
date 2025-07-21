@@ -14,10 +14,19 @@ import argparse
 from typing import List, Dict, Tuple
 
 class RISCVTestRunner:
-    def __init__(self):
+    def __init__(self, toolchain_base: str = None, use_clang: bool = False):
         # Tool paths
-        self.toolchain_base = "/scratch/kitoc/riscv-gnu-workspace/rv64gc-sifive-linux/install/bin"
-        self.as_cmd = f"{self.toolchain_base}/riscv64-unknown-linux-gnu-as"
+        if toolchain_base:
+            self.toolchain_base = toolchain_base
+        else:
+            self.toolchain_base = "/scratch/kitoc/riscv-gnu-workspace/rv64gc-sifive-linux/install/bin"
+        
+        self.use_clang = use_clang
+        if use_clang:
+            self.as_cmd = f"{self.toolchain_base}/riscv64-unknown-linux-gnu-clang"
+        else:
+            self.as_cmd = f"{self.toolchain_base}/riscv64-unknown-linux-gnu-as"
+        
         self.ld_cmd = f"{self.toolchain_base}/riscv64-unknown-linux-gnu-ld"
         self.objdump_cmd = f"{self.toolchain_base}/riscv64-unknown-linux-gnu-objdump"
 
@@ -80,7 +89,23 @@ class RISCVTestRunner:
         print(f"\n=== Running test: {target_name} ===")
 
         # Step 1: Assemble
-        as_cmd = [self.as_cmd, source_file, '-o', obj_file, '-march=rv64gc', '-mrelax'] + config_flags
+        if self.use_clang:
+            # Convert assembler flags for clang
+            clang_flags = ['-c', source_file, '-o', obj_file, '-march=rv64gc', '-mrelax']
+            i = 0
+            while i < len(config_flags):
+                flag = config_flags[i]
+                if flag == '-defsym' and i + 1 < len(config_flags):
+                    # Convert -defsym SYMBOL=1 to -Wa,--defsym,SYMBOL=1
+                    defsym_value = config_flags[i + 1]
+                    clang_flags.append(f'-Wa,--defsym,{defsym_value}')
+                    i += 2  # Skip both -defsym and its value
+                else:
+                    clang_flags.append(flag)
+                    i += 1
+            as_cmd = [self.as_cmd] + clang_flags
+        else:
+            as_cmd = [self.as_cmd, source_file, '-o', obj_file, '-march=rv64gc', '-mrelax'] + config_flags
         success, output = self.run_command(as_cmd, "assembling")
         if not success:
             return False
@@ -182,19 +207,153 @@ class RISCVTestRunner:
             for file in Path('.').glob(pattern):
                 print(f"Removing {file}")
                 file.unlink()
+    
+    def get_config_suffix(self, config_name: str) -> str:
+        """Map config names to .d file suffixes."""
+        config_map = {
+            'norelax': 'norelax',
+            'norvc-norelax': 'norelax.norvc',
+            'norvc': 'norvc', 
+            'relax-rvc': 'relax.rvc'
+        }
+        return config_map.get(config_name, config_name)
+    
+    def get_as_flags_string(self, config_name: str) -> str:
+        """Get assembler flags as string for .d file."""
+        if self.use_clang:
+            base_flags = "-c -march=rv64gc -mrelax"
+            config_flags = self.configs.get(config_name, [])
+            
+            # Convert defsym flags for clang format
+            clang_flags = []
+            i = 0
+            while i < len(config_flags):
+                flag = config_flags[i]
+                if flag == '-defsym' and i + 1 < len(config_flags):
+                    # Convert -defsym SYMBOL=1 to -Wa,--defsym,SYMBOL=1
+                    defsym_value = config_flags[i + 1]
+                    clang_flags.append(f'-Wa,--defsym,{defsym_value}')
+                    i += 2  # Skip both -defsym and its value
+                else:
+                    clang_flags.append(flag)
+                    i += 1
+            
+            flag_str = " ".join(clang_flags)
+            if flag_str:
+                return f"{base_flags} {flag_str}"
+            return base_flags
+        else:
+            base_flags = "-mrelax -march=rv64gc"
+            config_flags = self.configs.get(config_name, [])
+            
+            # Convert list of flags to string
+            flag_str = " ".join(config_flags)
+            if flag_str:
+                return f"{base_flags} {flag_str}"
+            return base_flags
+    
+    def generate_binutils_testcases(self, sources: List[str] = None, configs: List[str] = None, output_dir: str = ""):
+        """Generate binutils testcase .d files."""
+        if sources is None:
+            sources = [s for s in self.sources.keys() if s != 'test']  # Exclude 'test'
+        if configs is None:
+            configs = list(self.configs.keys())
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        print(f"Generating binutils testcases in {output_path}")
+        
+        generated_testcases = []
+        
+        for source in sources:
+            if source not in self.sources:
+                print(f"Warning: Unknown source '{source}', skipping")
+                continue
+            if source == 'test':
+                print(f"Skipping '{source}' as it's not a relax-align test")
+                continue
+                
+            source_file = self.sources[source]
+            # Extract base name (e.g., 'relax-align-1' from 'relax-align-1.s')
+            base_name = source_file.replace('.s', '')
+            
+            for config in configs:
+                if config not in self.configs:
+                    print(f"Warning: Unknown config '{config}', skipping")
+                    continue
+                
+                # Generate .d filename
+                config_suffix = self.get_config_suffix(config)
+                d_filename = f"{base_name}-{config_suffix}.d"
+                d_filepath = output_path / d_filename
+                
+                # First run the test to generate the dump file
+                success = self.run_test(source, config)
+                if not success:
+                    print(f"Failed to generate test for {source}-{config}, skipping .d file generation")
+                    continue
+                
+                # Generate dump filename to read from
+                if source == 'test':
+                    prefix = 'test'
+                else:
+                    prefix = source
+                dump_file = f"{prefix}.{config.replace('-', '.')}.dump"
+                
+                # Generate .d file content
+                as_flags = self.get_as_flags_string(config)
+                
+                d_content = f"""#source: {source_file}
+#as: {as_flags}
+#ld: -melf64lriscv -Trelax-align.ld
+#objdump: -d
+"""
+                
+                # Run binutils-gen-dump-scan to get the content
+                scan_cmd = ["binutils-gen-dump-scan", dump_file, "--opcode-check", "--addr-check"]
+                success, scan_output = self.run_command(scan_cmd, f"generating dump scan for {d_filename}")
+                
+                if success:
+                    d_content += scan_output
+                else:
+                    print(f"Warning: binutils-gen-dump-scan failed for {dump_file}, using placeholder")
+                    d_content += "# binutils-gen-dump-scan failed\n"
+                
+                # Write .d file
+                with open(d_filepath, 'w') as f:
+                    f.write(d_content)
+                
+                print(f"Generated {d_filepath}")
+                
+                # Add testcase name to list (without .d extension)
+                testcase_name = f"{base_name}-{config_suffix}"
+                generated_testcases.append(testcase_name)
+        
+        print(f"Binutils testcase generation completed in {output_path}")
+        
+        # Output run_dump_test commands
+        if generated_testcases:
+            print("\nGenerated testcases:")
+            for testcase in generated_testcases:
+                print(f'    run_dump_test "{testcase}"')
 
 def main():
     parser = argparse.ArgumentParser(description='RISC-V Alignment Test Runner')
-    parser.add_argument('--sources', nargs='*', choices=['test', 'relax1', 'relax2', 'relax3', 'relax4', 'relax5', 'relax6', 'relax7', 'relax8'],
+    parser.add_argument('--sources', nargs='*', choices=['test', 'relax1', 'relax2', 'relax3', 'relax4', 'relax5', 'relax6', 'relax7', 'relax8', 'relax9', 'relax10', 'relax11', 'relax12'],
                        help='Source files to test (default: all)')
     parser.add_argument('--configs', nargs='*', choices=['norvc', 'norvc-norelax', 'norelax', 'relax-rvc'],
                        help='Configurations to test (default: all)')
     parser.add_argument('--clean', action='store_true', help='Clean generated files')
     parser.add_argument('--list', action='store_true', help='List available tests')
+    parser.add_argument('--gen-binutils-test', action='store_true', help='Generate binutils testcases')
+    parser.add_argument('--output-dir', help='Output directory for binutils testcases (required with --gen-binutils-test)')
+    parser.add_argument('--toolchain-base', help='Override toolchain base path')
+    parser.add_argument('--clang', action='store_true', help='Use clang instead of gas for assembly')
 
     args = parser.parse_args()
 
-    runner = RISCVTestRunner()
+    runner = RISCVTestRunner(args.toolchain_base, args.clang)
 
     if args.clean:
         runner.clean()
@@ -205,6 +364,13 @@ def main():
         print("Available configs:", list(runner.configs.keys()))
         print("\nExample usage:")
         print("  python test_runner.py --sources test relax1 --configs norvc norelax")
+        return
+    
+    if args.gen_binutils_test:
+        if not args.output_dir:
+            print("Error: --output-dir is required when using --gen-binutils-test")
+            sys.exit(1)
+        runner.generate_binutils_testcases(args.sources, args.configs, args.output_dir)
         return
 
     # Run tests
