@@ -1,86 +1,46 @@
-AS:=/scratch/kitoc/riscv-gnu-workspace/rv64gc-sifive-linux/install/bin/riscv64-unknown-linux-gnu-as
-LD:=/scratch/kitoc/riscv-gnu-workspace/rv64gc-sifive-linux/install/bin/riscv64-unknown-linux-gnu-ld
-OBJDUMP:=/scratch/kitoc/riscv-gnu-workspace/rv64gc-sifive-linux/install/bin/riscv64-unknown-linux-gnu-objdump
+# RISC-V Alignment Test Makefile
+# Now using Python test runner for better maintainability
 
-TESTS:=norvc norvc-norelax norelax relax-rvc \
-	relax1-norvc relax1-norvc-norelax relax1-norelax relax1-relax-rvc \
-	relax2-norvc relax2-norvc-norelax relax2-norelax relax2-relax-rvc
+.PHONY: all test clean list help
 
-all: $(TESTS)
+# Default target - run all tests
+all: test
 
-norvc: test.s
-	$(AS) test.s -o test.norvc.o -march=rv64gc -mrelax -defsym NORVC=1
-	$(LD) -Tx.ld test.norvc.o -o test.norvc.elf
-	$(OBJDUMP) -d test.norvc.elf > test.norvc.dump
-	grep SHOULD_ALIGN_8_HERE test.norvc.dump
+# Run all tests using Python script
+test:
+	python3 test_runner.py
 
-norvc-norelax: test.s
-	$(AS) test.s -o test.norvc-norelax.o -march=rv64gc -mrelax -defsym NORVC=1 -defsym NORELAX=1
-	$(LD) -Tx.ld test.norvc-norelax.o -o test.norvc-norelax.elf
-	$(OBJDUMP) -d test.norvc-norelax.elf > test.norvc-norelax.dump
-	grep SHOULD_ALIGN_8_HERE test.norvc-norelax.dump
+# Run specific test configurations
+test-norvc:
+	python3 test_runner.py --configs norvc
 
-norelax: test.s
-	$(AS) test.s -o test.norelax.o -march=rv64gc -mrelax -defsym NORELAX=1
-	$(LD) -Tx.ld test.norelax.o -o test.norelax.elf
-	$(OBJDUMP) -d test.norelax.elf > test.norelax.dump
-	grep SHOULD_ALIGN_8_HERE test.norelax.dump
+test-norelax:
+	python3 test_runner.py --configs norelax
 
-relax-rvc: test.s
-	$(AS) test.s -o test.relax-rvc.o -march=rv64gc -mrelax
-	$(LD) -Tx.ld test.relax-rvc.o -o test.relax-rvc.elf
-	$(OBJDUMP) -d test.relax-rvc.elf > test.relax-rvc.dump
-	grep SHOULD_ALIGN_8_HERE test.relax-rvc.dump
+test-relax1:
+	python3 test_runner.py --sources relax1
 
-# relax-align-1.s tests
-relax1-norvc: relax-align-1.s
-	$(AS) relax-align-1.s -o relax1.norvc.o -march=rv64gc -mrelax -defsym NORVC=1
-	$(LD) -Tx.ld relax1.norvc.o -o relax1.norvc.elf
-	$(OBJDUMP) -d relax1.norvc.elf > relax1.norvc.dump
-	grep SHOULD_ALIGN_8_HERE relax1.norvc.dump
+test-relax2:
+	python3 test_runner.py --sources relax2
 
-relax1-norvc-norelax: relax-align-1.s
-	$(AS) relax-align-1.s -o relax1.norvc-norelax.o -march=rv64gc -mrelax -defsym NORVC=1 -defsym NORELAX=1
-	$(LD) -Tx.ld relax1.norvc-norelax.o -o relax1.norvc-norelax.elf
-	$(OBJDUMP) -d relax1.norvc-norelax.elf > relax1.norvc-norelax.dump
-	grep SHOULD_ALIGN_8_HERE relax1.norvc-norelax.dump
-
-relax1-norelax: relax-align-1.s
-	$(AS) relax-align-1.s -o relax1.norelax.o -march=rv64gc -mrelax -defsym NORELAX=1
-	$(LD) -Tx.ld relax1.norelax.o -o relax1.norelax.elf
-	$(OBJDUMP) -d relax1.norelax.elf > relax1.norelax.dump
-	grep SHOULD_ALIGN_8_HERE relax1.norelax.dump
-
-relax1-relax-rvc: relax-align-1.s
-	$(AS) relax-align-1.s -o relax1.relax-rvc.o -march=rv64gc -mrelax
-	$(LD) -Tx.ld relax1.relax-rvc.o -o relax1.relax-rvc.elf
-	$(OBJDUMP) -d relax1.relax-rvc.elf > relax1.relax-rvc.dump
-	grep SHOULD_ALIGN_8_HERE relax1.relax-rvc.dump
-
-# relax-align-2.s tests
-relax2-norvc: relax-align-2.s
-	$(AS) relax-align-2.s -o relax2.norvc.o -march=rv64gc -mrelax -defsym NORVC=1
-	$(LD) -Tx.ld relax2.norvc.o -o relax2.norvc.elf
-	$(OBJDUMP) -d relax2.norvc.elf > relax2.norvc.dump
-	grep SHOULD_ALIGN_8_HERE relax2.norvc.dump
-
-relax2-norvc-norelax: relax-align-2.s
-	$(AS) relax-align-2.s -o relax2.norvc-norelax.o -march=rv64gc -mrelax -defsym NORVC=1 -defsym NORELAX=1
-	$(LD) -Tx.ld relax2.norvc-norelax.o -o relax2.norvc-norelax.elf
-	$(OBJDUMP) -d relax2.norvc-norelax.elf > relax2.norvc-norelax.dump
-	grep SHOULD_ALIGN_8_HERE relax2.norvc-norelax.dump
-
-relax2-norelax: relax-align-2.s
-	$(AS) relax-align-2.s -o relax2.norelax.o -march=rv64gc -mrelax -defsym NORELAX=1
-	$(LD) -Tx.ld relax2.norelax.o -o relax2.norelax.elf
-	$(OBJDUMP) -d relax2.norelax.elf > relax2.norelax.dump
-	grep SHOULD_ALIGN_8_HERE relax2.norelax.dump
-
-relax2-relax-rvc: relax-align-2.s
-	$(AS) relax-align-2.s -o relax2.relax-rvc.o -march=rv64gc -mrelax
-	$(LD) -Tx.ld relax2.relax-rvc.o -o relax2.relax-rvc.elf
-	$(OBJDUMP) -d relax2.relax-rvc.elf > relax2.relax-rvc.dump
-	grep SHOULD_ALIGN_8_HERE relax2.relax-rvc.dump
-
+# Clean generated files
 clean:
-	rm *.o *.elf *.dump
+	python3 test_runner.py --clean
+
+# List available tests
+list:
+	python3 test_runner.py --list
+
+# Show help
+help:
+	@echo "Available targets:"
+	@echo "  all, test       - Run all tests"
+	@echo "  test-norvc      - Run only norvc configuration"
+	@echo "  test-norelax    - Run only norelax configuration"
+	@echo "  test-relax1     - Run only relax-align-1.s tests"
+	@echo "  test-relax2     - Run only relax-align-2.s tests"
+	@echo "  clean           - Clean generated files"
+	@echo "  list            - List available tests"
+	@echo "  help            - Show this help"
+	@echo ""
+	@echo "For more options, run: python3 test_runner.py --help"
