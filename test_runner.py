@@ -357,6 +357,178 @@ class RISCVTestRunner:
             for testcase in generated_testcases:
                 print(f'    run_dump_test "{testcase}"')
 
+    def extract_align_addresses(self, dump_file: str) -> Dict[str, int]:
+        """Extract SHOULD_ALIGN_X_HERE addresses from dump file."""
+        addresses = {}
+        try:
+            with open(dump_file, 'r') as f:
+                content = f.read()
+
+            # Look for SHOULD_ALIGN_X_HERE symbols
+            pattern = r'([0-9a-fA-F]+)\s+<(SHOULD_ALIGN_\d+_HERE)>:'
+            matches = re.findall(pattern, content)
+
+            for address_str, symbol in matches:
+                address = int(address_str, 16)
+                addresses[symbol] = address
+
+        except FileNotFoundError:
+            print(f"Warning: Dump file {dump_file} not found")
+        except Exception as e:
+            print(f"Warning: Error reading dump file {dump_file}: {e}")
+
+        return addresses
+
+    def generate_llvm_testcases(self, sources: List[str] = None, configs: List[str] = None, output_dir: str = ""):
+        """Generate LLVM testcase files."""
+        if sources is None:
+            sources = [s for s in self.sources.keys() if s != 'test']  # Exclude 'test'
+        if configs is None:
+            configs = list(self.configs.keys())
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"Generating LLVM testcases in {output_path}")
+
+        for source in sources:
+            if source not in self.sources:
+                print(f"Warning: Unknown source '{source}', skipping")
+                continue
+            if source == 'test':
+                print(f"Skipping '{source}' as it's not a relax-align test")
+                continue
+
+            source_file = self.sources[source]
+            # Extract base name (e.g., 'relax-align-1' from 'relax-align-1.s')
+            base_name = source_file.replace('.s', '')
+
+            # Generate LLVM test filename
+            llvm_test_file = f"riscv-{base_name}.s"
+            llvm_test_path = output_path / llvm_test_file
+
+            # Read original .s file content
+            try:
+                with open(source_file, 'r') as f:
+                    original_content = f.read()
+            except FileNotFoundError:
+                print(f"Warning: Source file {source_file} not found, skipping")
+                continue
+
+            # Read linker script content
+            try:
+                with open('x.ld', 'r') as f:
+                    ld_content = f.read()
+            except FileNotFoundError:
+                print("Warning: x.ld not found, using empty linker script")
+                ld_content = ""
+
+            # Collect addresses for all configurations
+            config_addresses = {}
+
+            for config in configs:
+                if config not in self.configs:
+                    print(f"Warning: Unknown config '{config}', skipping")
+                    continue
+
+                # Run the test to generate dump file
+                success = self.run_test(source, config)
+                if not success:
+                    print(f"Failed to generate test for {source}-{config}, skipping")
+                    continue
+
+                # Generate dump filename to read from
+                prefix = source
+                dump_file = f"{prefix}.{config.replace('-', '.')}.dump"
+
+                # Extract addresses
+                addresses = self.extract_align_addresses(dump_file)
+                config_addresses[config] = addresses
+
+            # Generate LLVM test file content
+            llvm_content = self.generate_llvm_content(base_name, original_content, ld_content, config_addresses)
+
+            # Write LLVM test file
+            with open(llvm_test_path, 'w') as f:
+                f.write(llvm_content)
+
+            print(f"Generated {llvm_test_path}")
+
+        print(f"LLVM testcase generation completed in {output_path}")
+
+    def generate_llvm_content(self, base_name: str, original_content: str, ld_content: str, config_addresses: Dict[str, Dict[str, int]]) -> str:
+        """Generate LLVM test file content."""
+
+        # Header
+        content = """# REQUIRES: riscv
+## Testing the aligment is correct when mixing with rvc/norvc relax/norelax
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+"""
+
+        # Generate test cases for each configuration
+        config_mapping = {
+            'norvc-norelax': ('NORVC', 'NORELAX'),
+            'norvc': ('NORVC', ''),
+            'norelax': ('', 'NORELAX'),
+            'relax-rvc': ('', '')
+        }
+
+        for config, (norvc_flag, norelax_flag) in config_mapping.items():
+            if config not in config_addresses:
+                continue
+
+            addresses = config_addresses[config]
+            if not addresses:
+                continue
+
+            # Generate config description
+            config_desc = []
+            if norvc_flag:
+                config_desc.append('NORVC')
+            else:
+                config_desc.append('RVC')
+
+            if norelax_flag:
+                config_desc.append('NORELAX')
+            else:
+                config_desc.append('RELAX')
+
+            config_name = ', '.join(config_desc)
+
+            content += f"\n## {config_name}\n"
+
+            # Generate RUN commands
+            defsym_flags = []
+            if norvc_flag:
+                defsym_flags.append('--defsym=NORVC=1')
+            if norelax_flag:
+                defsym_flags.append('--defsym=NORELAX=1')
+
+            defsym_str = ' '.join(defsym_flags)
+            if defsym_str:
+                defsym_str = ' ' + defsym_str
+
+            content += f"# RUN: llvm-mc -filetype=obj -triple=riscv64 -mattr=+relax,+c,+m a.s -o a.o{defsym_str}\n"
+            content += f"# RUN: ld.lld -T lds a.o -o a.out\n"
+
+            # Generate check prefix
+            check_prefix = config.upper()
+            content += f"# RUN: llvm-nm a.out | FileCheck %s --check-prefix={check_prefix}\n"
+
+            # Generate CHECK lines for each alignment symbol
+            for symbol, address in addresses.items():
+                content += f"\n# {check_prefix}: {address:016x} t {symbol}\n"
+
+        # Add file sections
+        content += "\n#--- a.s\n"
+        content += original_content
+
+        content += "\n#--- lds\n"
+        content += ld_content
+
+        return content
+
 def main():
     parser = argparse.ArgumentParser(description='RISC-V Alignment Test Runner')
     parser.add_argument('--sources', nargs='*', choices=['test', 'relax1', 'relax2', 'relax3', 'relax4', 'relax5', 'relax6', 'relax7', 'relax8', 'relax9', 'relax10', 'relax11', 'relax12'],
@@ -366,7 +538,8 @@ def main():
     parser.add_argument('--clean', action='store_true', help='Clean generated files')
     parser.add_argument('--list', action='store_true', help='List available tests')
     parser.add_argument('--gen-binutils-test', action='store_true', help='Generate binutils testcases')
-    parser.add_argument('--output-dir', help='Output directory for binutils testcases (required with --gen-binutils-test)', default="test-out")
+    parser.add_argument('--gen-llvm-test', action='store_true', help='Generate LLVM testcases')
+    parser.add_argument('--output-dir', help='Output directory for testcases (required with --gen-binutils-test or --gen-llvm-test)', default="test-out")
     parser.add_argument('--toolchain-base', help='Override toolchain base path')
     parser.add_argument('--clang', action='store_true', help='Use clang instead of gas for assembly')
     parser.add_argument('--clang-path', help='Override clang path (when using --clang)')
@@ -396,6 +569,13 @@ def main():
             print("Error: --output-dir is required when using --gen-binutils-test")
             sys.exit(1)
         runner.generate_binutils_testcases(args.sources, args.configs, args.output_dir)
+        return
+
+    if args.gen_llvm_test:
+        if not args.output_dir:
+            print("Error: --output-dir is required when using --gen-llvm-test")
+            sys.exit(1)
+        runner.generate_llvm_testcases(args.sources, args.configs, args.output_dir)
         return
 
     # Run tests
